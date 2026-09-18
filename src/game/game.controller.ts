@@ -55,7 +55,8 @@ export class GameController {
   @ApiParam({ name: 'gameId', format: 'uuid' })
   @ApiOkResponse({ description: 'Trả về private view của chủ phòng.' })
   @ApiBadRequestResponse({
-    description: 'Không phải chủ phòng, ván đã bắt đầu hoặc số role không khớp.',
+    description:
+      'Không phải chủ phòng, ván đã bắt đầu hoặc số role không khớp.',
   })
   configureRoles(
     @Param('gameId') gameId: string,
@@ -66,7 +67,9 @@ export class GameController {
 
   @Post(':gameId/start')
   @HttpCode(200)
-  @ApiOperation({ summary: 'Chủ phòng bắt đầu và chia ngẫu nhiên role đã cấu hình' })
+  @ApiOperation({
+    summary: 'Chủ phòng bắt đầu và chia ngẫu nhiên role đã cấu hình',
+  })
   @ApiParam({ name: 'gameId', format: 'uuid' })
   @ApiOkResponse({ description: 'Trả về private view của chủ phòng.' })
   start(@Param('gameId') gameId: string, @Body() body: StartGameDto) {

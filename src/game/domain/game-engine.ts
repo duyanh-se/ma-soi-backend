@@ -22,8 +22,7 @@ export class GameEngine {
     if (
       !actor.alive &&
       game.phase !== GamePhase.LOBBY &&
-      action.type !== GameActionType.END_DEFENSE &&
-      action.type !== GameActionType.ADVANCE_NIGHT
+      action.type !== GameActionType.END_DEFENSE
     ) {
       throw new BadRequestException(
         'Người đã chết không thể thực hiện hành động.',
@@ -52,14 +51,17 @@ export class GameEngine {
       case GameActionType.NOMINATE:
         this.nominate(game, actor, action.targetId);
         break;
+      case GameActionType.CAST_BLANK_NOMINATION:
+        this.castBlankNomination(game, actor);
+        break;
       case GameActionType.END_DEFENSE:
         this.endDefense(game, actor);
         break;
       case GameActionType.VOTE_EXECUTION:
         this.voteExecution(game, actor, action.use);
         break;
-      case GameActionType.ADVANCE_NIGHT:
-        this.advanceHiddenNightPhase(game, actor);
+      case GameActionType.CAST_BLANK_EXECUTION:
+        this.castBlankExecution(game, actor);
         break;
     }
     return game;
@@ -70,6 +72,34 @@ export class GameEngine {
     game.nightState = emptyNight();
     game.dayState = emptyDay();
     this.enterCupidOrGuard(game);
+  }
+
+  shouldAutoAdvanceNight(game: GameState): boolean {
+    return this.isNightPhase(game.phase) && !this.phaseHasLivingActor(game);
+  }
+
+  advanceAbsentNightPhase(game: GameState): void {
+    if (!this.shouldAutoAdvanceNight(game))
+      throw new BadRequestException('Lượt đêm hiện tại vẫn có người hành động.');
+    switch (game.phase) {
+      case GamePhase.NIGHT_GUARD:
+        this.enterWolfOrSeer(game);
+        return;
+      case GamePhase.NIGHT_WOLF:
+        this.enterSeerOrWitch(game);
+        return;
+      case GamePhase.NIGHT_SEER:
+        this.enterWitchHealOrPoison(game);
+        return;
+      case GamePhase.NIGHT_WITCH_HEAL:
+        this.enterWitchPoisonOrResolve(game);
+        return;
+      case GamePhase.NIGHT_WITCH_POISON:
+        this.resolveNight(game);
+        return;
+      default:
+        throw new BadRequestException('Không thể tự chuyển lượt này.');
+    }
   }
 
   private pairLovers(
@@ -191,10 +221,24 @@ export class GameEngine {
     this.requirePhase(game, GamePhase.DAY_NOMINATION);
     const target = this.livingPlayer(game, targetId);
     if (target.id === actor.id)
-      throw new BadRequestException('Không thể tự bỏ phiếu đưa bản thân lên giàn.');
-    if (game.dayState.nominationVotes[actor.id])
+      throw new BadRequestException(
+        'Không thể tự bỏ phiếu đưa bản thân lên giàn.',
+      );
+    if (Object.hasOwn(game.dayState.nominationVotes, actor.id))
       throw new BadRequestException('Bạn đã bỏ phiếu đưa người lên giàn.');
     game.dayState.nominationVotes[actor.id] = target.id;
+    if (
+      Object.keys(game.dayState.nominationVotes).length ===
+      this.living(game).length
+    )
+      this.resolveNomination(game);
+  }
+
+  private castBlankNomination(game: GameState, actor: GamePlayer): void {
+    this.requirePhase(game, GamePhase.DAY_NOMINATION);
+    if (Object.hasOwn(game.dayState.nominationVotes, actor.id))
+      throw new BadRequestException('Bạn đã bỏ phiếu đưa người lên giàn.');
+    game.dayState.nominationVotes[actor.id] = null;
     if (
       Object.keys(game.dayState.nominationVotes).length ===
       this.living(game).length
@@ -218,10 +262,12 @@ export class GameEngine {
   ): void {
     this.requirePhase(game, GamePhase.DAY_EXECUTION);
     if (actor.id === game.dayState.scaffoldedId)
-      throw new BadRequestException('Người đang lên giàn không được biểu quyết treo cổ.');
+      throw new BadRequestException(
+        'Người đang lên giàn không được biểu quyết treo cổ.',
+      );
     if (typeof use !== 'boolean')
       throw new BadRequestException('Cần chọn treo cổ hoặc không treo.');
-    if (game.dayState.executionVotes[actor.id] !== undefined)
+    if (Object.hasOwn(game.dayState.executionVotes, actor.id))
       throw new BadRequestException('Bạn đã bỏ phiếu treo cổ.');
     game.dayState.executionVotes[actor.id] = use;
     if (
@@ -229,21 +275,32 @@ export class GameEngine {
       this.executionVoters(game).length
     )
       return;
+    this.resolveExecutionVotes(game);
+  }
+
+  private resolveExecutionVotes(game: GameState): void {
     const votesForExecution = Object.values(
       game.dayState.executionVotes,
-    ).filter(Boolean).length;
+    ).filter((vote) => vote === true).length;
+    const votesAgainstExecution = Object.values(
+      game.dayState.executionVotes,
+    ).filter((vote) => vote === false).length;
     const scaffolded = this.player(game, game.dayState.scaffoldedId);
     if (votesForExecution > this.executionVoters(game).length / 2) {
-      this.killWithLoverChain(game, scaffolded.id);
+      this.killWithLoverChain(game, scaffolded.id, true);
       game.publicEvents.push(`${scaffolded.name} đã bị treo cổ.`);
       if (scaffolded.currentRole === Role.FOOL) {
         this.finish(game, [Faction.FOOL], [scaffolded.id]);
         return;
       }
+      if (this.hasPendingPublicDeaths(game)) {
+        this.beginNextNight(game);
+        return;
+      }
       if (this.checkWin(game)) return;
     } else {
       game.publicEvents.push(
-        votesForExecution === this.executionVoters(game).length - votesForExecution
+        votesForExecution === votesAgainstExecution
           ? `Biểu quyết treo cổ ${scaffolded.name} hòa phiếu; ngày kết thúc.`
           : `${scaffolded.name} không bị treo cổ.`,
       );
@@ -251,16 +308,39 @@ export class GameEngine {
     this.beginNextNight(game);
   }
 
+  private castBlankExecution(game: GameState, actor: GamePlayer): void {
+    this.requirePhase(game, GamePhase.DAY_EXECUTION);
+    if (actor.id === game.dayState.scaffoldedId)
+      throw new BadRequestException(
+        'Người đang lên giàn không được biểu quyết treo cổ.',
+      );
+    if (Object.hasOwn(game.dayState.executionVotes, actor.id))
+      throw new BadRequestException('Bạn đã bỏ phiếu treo cổ.');
+    game.dayState.executionVotes[actor.id] = null;
+    if (
+      Object.keys(game.dayState.executionVotes).length ===
+      this.executionVoters(game).length
+    )
+      this.resolveExecutionVotes(game);
+  }
+
   private resolveNomination(game: GameState): void {
     const totals = new Map<string, number>();
     for (const id of Object.values(game.dayState.nominationVotes))
-      totals.set(id, (totals.get(id) ?? 0) + 1);
+      if (id) totals.set(id, (totals.get(id) ?? 0) + 1);
+    if (totals.size === 0) {
+      game.publicEvents.push('Tất cả người chơi đều bỏ phiếu trắng; ngày kết thúc.');
+      this.beginNextNight(game);
+      return;
+    }
     const maximum = Math.max(...totals.values());
     const leaders = [...totals.entries()]
       .filter(([, count]) => count === maximum)
       .map(([id]) => id);
     if (leaders.length > 1) {
-      game.publicEvents.push('Biểu quyết đưa lên giàn hòa phiếu; ngày kết thúc.');
+      game.publicEvents.push(
+        'Biểu quyết đưa lên giàn hòa phiếu; ngày kết thúc.',
+      );
       this.beginNextNight(game);
       return;
     }
@@ -285,6 +365,7 @@ export class GameEngine {
   }
 
   private resolveNight(game: GameState): void {
+    const delayedLoverDeaths = this.revealPendingLoverDeaths(game);
     const aliveBeforeResolution = new Set(
       this.living(game).map((player) => player.id),
     );
@@ -310,10 +391,13 @@ export class GameEngine {
     const deadTonight = game.players.filter(
       (player) => aliveBeforeResolution.has(player.id) && !player.alive,
     );
+    const announcedDeaths = [...delayedLoverDeaths, ...deadTonight].filter(
+      (player, index, all) => all.findIndex((item) => item.id === player.id) === index,
+    );
     game.publicEvents.push(
-      deadTonight.length === 0
+      announcedDeaths.length === 0
         ? `Sáng ngày ${game.night}: Không có ai bị loại.`
-        : `Sáng ngày ${game.night}: ${deadTonight.map((player) => player.name).join(', ')} đã bị loại.`,
+        : `Sáng ngày ${game.night}: ${announcedDeaths.map((player) => player.name).join(', ')} đã bị loại.`,
     );
     if (this.checkWin(game)) return;
     game.phase = GamePhase.DAY_NOMINATION;
@@ -383,34 +467,6 @@ export class GameEngine {
     game.phase = GamePhase.NIGHT_WITCH_POISON;
   }
 
-  private advanceHiddenNightPhase(game: GameState, actor: GamePlayer): void {
-    if (actor.id !== game.hostId)
-      throw new BadRequestException('Chỉ chủ phòng có thể tiếp tục lượt đêm không có người hành động.');
-    if (!this.isNightPhase(game.phase))
-      throw new BadRequestException('Chỉ có thể tiếp tục một lượt đêm.');
-    if (this.phaseHasLivingActor(game))
-      throw new BadRequestException('Vai trò hiện tại vẫn có người chơi có thể hành động.');
-    switch (game.phase) {
-      case GamePhase.NIGHT_GUARD:
-        this.enterWolfOrSeer(game);
-        return;
-      case GamePhase.NIGHT_WOLF:
-        this.enterSeerOrWitch(game);
-        return;
-      case GamePhase.NIGHT_SEER:
-        this.enterWitchHealOrPoison(game);
-        return;
-      case GamePhase.NIGHT_WITCH_HEAL:
-        this.enterWitchPoisonOrResolve(game);
-        return;
-      case GamePhase.NIGHT_WITCH_POISON:
-        this.resolveNight(game);
-        return;
-      default:
-        throw new BadRequestException('Không thể bỏ qua lượt này.');
-    }
-  }
-
   private recalculateLoverFactions(game: GameState): void {
     const cupid = game.players.find(
       (player) => player.currentRole === Role.CUPID,
@@ -418,10 +474,7 @@ export class GameEngine {
     const paired = game.players.filter((player) => player.loverId);
     if (paired.length !== 2 || !cupid) return;
     const [first, second] = paired;
-    if (
-      first.currentRole === Role.FOOL ||
-      second.currentRole === Role.FOOL
-    ) {
+    if (first.currentRole === Role.FOOL || second.currentRole === Role.FOOL) {
       first.faction = Faction.LOVERS;
       second.faction = Faction.LOVERS;
       if (first.id !== cupid.id && second.id !== cupid.id)
@@ -430,6 +483,11 @@ export class GameEngine {
     }
     if (first.id === cupid.id || second.id === cupid.id) {
       const partner = first.id === cupid.id ? second : first;
+      if (partner.currentRole === Role.WOLF) {
+        cupid.faction = Faction.LOVERS;
+        partner.faction = Faction.LOVERS;
+        return;
+      }
       cupid.faction = this.roleFaction(partner.currentRole);
       partner.faction = this.roleFaction(partner.currentRole);
       return;
@@ -493,11 +551,37 @@ export class GameEngine {
         .map((player) => player.id);
   }
 
-  private killWithLoverChain(game: GameState, playerId: string): void {
+  private killWithLoverChain(
+    game: GameState,
+    playerId: string,
+    delayLoverDeath = false,
+    isLoverChain = false,
+  ): void {
     const victim = this.player(game, playerId);
     if (!victim.alive) return;
     victim.alive = false;
-    if (victim.loverId) this.killWithLoverChain(game, victim.loverId);
+    if (delayLoverDeath && isLoverChain) {
+      victim.publicAlive = true;
+      victim.pendingPublicDeath = true;
+    } else {
+      victim.publicAlive = false;
+      victim.pendingPublicDeath = false;
+    }
+    if (victim.loverId)
+      this.killWithLoverChain(game, victim.loverId, delayLoverDeath, true);
+  }
+
+  private hasPendingPublicDeaths(game: GameState): boolean {
+    return game.players.some((player) => player.pendingPublicDeath);
+  }
+
+  private revealPendingLoverDeaths(game: GameState): GamePlayer[] {
+    return game.players.filter((player) => {
+      if (!player.pendingPublicDeath) return false;
+      player.pendingPublicDeath = false;
+      player.publicAlive = false;
+      return true;
+    });
   }
 
   private roleFaction(role?: Role): Faction {

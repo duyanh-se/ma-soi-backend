@@ -18,10 +18,14 @@ import { GameRepository } from './repositories/game.repository';
 @Injectable()
 export class GameService {
   private readonly engine = new GameEngine();
+  private readonly absentRoleTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private static readonly ABSENT_ROLE_DELAY_MS = 30_000;
 
   constructor(private readonly games: GameRepository) {}
 
-  async create(hostName: string): Promise<{ gameId: string; hostPlayerId: string }> {
+  async create(
+    hostName: string,
+  ): Promise<{ gameId: string; hostPlayerId: string }> {
     const host = this.newPlayer(hostName);
     const state: GameState = {
       id: randomUUID(),
@@ -77,6 +81,7 @@ export class GameService {
     game.publicEvents.push('Ván chơi đã bắt đầu.');
     this.engine.begin(game);
     await this.games.save(game);
+    this.scheduleAbsentNightPhase(game);
     return this.project(game, actorId);
   }
 
@@ -88,11 +93,14 @@ export class GameService {
     const game = await this.game(gameId);
     this.engine.apply(game, actorId, action);
     await this.games.save(game);
+    this.scheduleAbsentNightPhase(game);
     return this.project(game, actorId);
   }
 
   async view(gameId: string, playerId: string): Promise<unknown> {
-    return this.project(await this.game(gameId), playerId);
+    const game = await this.game(gameId);
+    this.scheduleAbsentNightPhase(game);
+    return this.project(game, playerId);
   }
 
   async configureRoles(
@@ -104,7 +112,9 @@ export class GameService {
     if (actorId !== game.hostId)
       throw new BadRequestException('Chỉ chủ phòng có thể cấu hình role.');
     if (game.phase !== GamePhase.LOBBY)
-      throw new BadRequestException('Không thể thay đổi role sau khi ván đã bắt đầu.');
+      throw new BadRequestException(
+        'Không thể thay đổi role sau khi ván đã bắt đầu.',
+      );
     if (roles.length !== game.players.length) {
       throw new BadRequestException(
         'Số role phải bằng số người chơi đang trong phòng.',
@@ -113,6 +123,33 @@ export class GameService {
     game.roles = [...roles];
     await this.games.save(game);
     return this.project(game, actorId);
+  }
+
+  private scheduleAbsentNightPhase(game: GameState): void {
+    const existingTimer = this.absentRoleTimers.get(game.id);
+    if (!this.engine.shouldAutoAdvanceNight(game)) {
+      if (existingTimer) clearTimeout(existingTimer);
+      this.absentRoleTimers.delete(game.id);
+      return;
+    }
+    if (existingTimer) return;
+    const timer = setTimeout(() => {
+      this.absentRoleTimers.delete(game.id);
+      void this.advanceAbsentNightPhase(game.id);
+    }, GameService.ABSENT_ROLE_DELAY_MS);
+    this.absentRoleTimers.set(game.id, timer);
+  }
+
+  private async advanceAbsentNightPhase(gameId: string): Promise<void> {
+    try {
+      const game = await this.game(gameId);
+      if (!this.engine.shouldAutoAdvanceNight(game)) return;
+      this.engine.advanceAbsentNightPhase(game);
+      await this.games.save(game);
+      this.scheduleAbsentNightPhase(game);
+    } catch {
+      // A later view request will schedule the hidden transition again if needed.
+    }
   }
 
   private project(game: GameState, playerId: string): unknown {
@@ -130,14 +167,12 @@ export class GameService {
         players: game.players.map((player) => ({
           id: player.id,
           name: player.name,
-          alive: player.alive,
+          alive: player.publicAlive ?? player.alive,
         })),
         publicEvents: game.publicEvents,
         winners: game.phase === GamePhase.FINISHED ? game.winners : undefined,
         winnerPlayerIds:
-          game.phase === GamePhase.FINISHED
-            ? game.winnerPlayerIds
-            : undefined,
+          game.phase === GamePhase.FINISHED ? game.winnerPlayerIds : undefined,
         finalRoles:
           game.phase === GamePhase.FINISHED
             ? game.players.map((player) => ({
@@ -161,15 +196,6 @@ export class GameService {
           viewer.id === game.hostId && game.phase === GamePhase.LOBBY
             ? game.roles
             : undefined,
-        canAdvanceNight:
-          viewer.id === game.hostId &&
-          [
-            GamePhase.NIGHT_GUARD,
-            GamePhase.NIGHT_WOLF,
-            GamePhase.NIGHT_SEER,
-            GamePhase.NIGHT_WITCH_HEAL,
-            GamePhase.NIGHT_WITCH_POISON,
-          ].includes(game.phase),
         actionPhase: this.actionPhaseForViewer(game, viewer),
         role: privateRole,
         faction: this.visibleFaction(viewer),
@@ -179,7 +205,7 @@ export class GameService {
         lover: lover && {
           id: lover.id,
           name: lover.name,
-          alive: lover.alive,
+          alive: lover.publicAlive ?? lover.alive,
           role: this.visibleRole(lover),
           faction: this.visibleFaction(lover),
         },
@@ -220,6 +246,9 @@ export class GameService {
           game.phase === GamePhase.DAY_NOMINATION
             ? game.dayState.nominationVotes[viewer.id]
             : undefined,
+        nominationVoteSubmitted:
+          game.phase === GamePhase.DAY_NOMINATION &&
+          Object.hasOwn(game.dayState.nominationVotes, viewer.id),
         executionVote:
           game.phase === GamePhase.DAY_EXECUTION &&
           Object.hasOwn(game.dayState.executionVotes, viewer.id)
@@ -239,6 +268,7 @@ export class GameService {
       id: randomUUID(),
       name: normalizedName,
       alive: true,
+      publicAlive: true,
       state: {
         cupidUsed: false,
         healPotion: true,
@@ -293,9 +323,17 @@ export class GameService {
       viewer.currentRole === Role.GUARD
     )
       return game.phase;
-    if (game.phase === GamePhase.NIGHT_WOLF && viewer.alive && viewer.currentRole === Role.WOLF)
+    if (
+      game.phase === GamePhase.NIGHT_WOLF &&
+      viewer.alive &&
+      viewer.currentRole === Role.WOLF
+    )
       return game.phase;
-    if (game.phase === GamePhase.NIGHT_SEER && viewer.alive && viewer.currentRole === Role.SEER)
+    if (
+      game.phase === GamePhase.NIGHT_SEER &&
+      viewer.alive &&
+      viewer.currentRole === Role.SEER
+    )
       return game.phase;
     if (
       viewer.alive &&

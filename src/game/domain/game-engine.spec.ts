@@ -63,7 +63,9 @@ describe('GameEngine', () => {
       type: GameActionType.VOTE_WOLF_TARGET,
       targetId: 'villager-2',
     });
-    expect(['villager-1', 'villager-2']).toContain(game.nightState.wolfTargetId);
+    expect(['villager-1', 'villager-2']).toContain(
+      game.nightState.wolfTargetId,
+    );
     expect(game.phase).toBe(GamePhase.NIGHT_SEER);
     expect(() =>
       engine.apply(game, 'wolf-1', {
@@ -202,13 +204,94 @@ describe('GameEngine', () => {
     expect(game.phase).toBe(GamePhase.NIGHT_GUARD);
   });
 
-  it('keeps public night phases and lets the host advance a phase with no living role', () => {
+  it('records blank ballots without assigning them to a player or execution choice', () => {
+    const nominationGame = makeGame(
+      [
+        makePlayer('host', Role.VILLAGER),
+        makePlayer('second', Role.VILLAGER),
+        makePlayer('third', Role.WOLF),
+      ],
+      GamePhase.DAY_NOMINATION,
+    );
+    const engine = new GameEngine();
+    engine.apply(nominationGame, 'host', {
+      type: GameActionType.CAST_BLANK_NOMINATION,
+    });
+    expect(nominationGame.dayState.nominationVotes.host).toBeNull();
+    engine.apply(nominationGame, 'second', {
+      type: GameActionType.NOMINATE,
+      targetId: 'third',
+    });
+    engine.apply(nominationGame, 'third', {
+      type: GameActionType.NOMINATE,
+      targetId: 'second',
+    });
+    expect(nominationGame.phase).toBe(GamePhase.NIGHT_GUARD);
+
+    const executionGame = makeGame(
+      [
+        makePlayer('host', Role.VILLAGER),
+        makePlayer('second', Role.VILLAGER),
+        makePlayer('third', Role.WOLF),
+      ],
+      GamePhase.DAY_EXECUTION,
+    );
+    executionGame.dayState.scaffoldedId = 'host';
+    engine.apply(executionGame, 'second', {
+      type: GameActionType.CAST_BLANK_EXECUTION,
+    });
+    expect(executionGame.dayState.executionVotes.second).toBeNull();
+    engine.apply(executionGame, 'third', {
+      type: GameActionType.VOTE_EXECUTION,
+      use: true,
+    });
+    expect(executionGame.players[0].alive).toBe(true);
+    expect(executionGame.phase).toBe(GamePhase.NIGHT_GUARD);
+  });
+
+  it('reveals a lover who dies from grief on the following morning after an execution', () => {
+    const game = makeGame(
+      [
+        makePlayer('host', Role.VILLAGER),
+        makePlayer('lover', Role.VILLAGER),
+        makePlayer('wolf', Role.WOLF),
+        makePlayer('seer', Role.SEER),
+      ],
+      GamePhase.DAY_EXECUTION,
+    );
+    game.players[0].loverId = 'lover';
+    game.players[1].loverId = 'host';
+    game.dayState.scaffoldedId = 'host';
+    const engine = new GameEngine();
+
+    for (const voterId of ['lover', 'wolf', 'seer'])
+      engine.apply(game, voterId, {
+        type: GameActionType.VOTE_EXECUTION,
+        use: true,
+      });
+
+    expect(game.players[0].alive).toBe(false);
+    expect(game.players[1].alive).toBe(false);
+    expect(game.players[1].publicAlive).toBe(true);
+    expect(game.players[1].pendingPublicDeath).toBe(true);
+    expect(game.phase).toBe(GamePhase.NIGHT_GUARD);
+
+    game.phase = GamePhase.NIGHT_WITCH_POISON;
+    engine.advanceAbsentNightPhase(game);
+
+    expect(game.players[1].publicAlive).toBe(false);
+    expect(game.players[1].pendingPublicDeath).toBe(false);
+    expect(game.publicEvents.at(-1)).toContain('lover đã bị loại');
+  });
+
+  it('keeps public night phases and advances an absent role phase internally', () => {
     const game = makeGame(
       [makePlayer('host', Role.VILLAGER), makePlayer('other', Role.VILLAGER)],
       GamePhase.NIGHT_GUARD,
     );
     const engine = new GameEngine();
-    engine.apply(game, 'host', { type: GameActionType.ADVANCE_NIGHT });
+    expect(engine.shouldAutoAdvanceNight(game)).toBe(true);
+    engine.advanceAbsentNightPhase(game);
     expect(game.phase).toBe(GamePhase.NIGHT_WOLF);
   });
 
@@ -224,8 +307,31 @@ describe('GameEngine', () => {
     });
     expect(game.players[0].faction).toBe(Faction.LOVERS);
     expect(game.players[1].faction).toBe(Faction.LOVERS);
-    expect(game.players[0].state.notifications[0]).toContain('phe Tình nhân độc lập');
-    expect(game.players[1].state.notifications[0]).toContain('phe Tình nhân độc lập');
+    expect(game.players[0].state.notifications[0]).toContain(
+      'phe Tình nhân độc lập',
+    );
+    expect(game.players[1].state.notifications[0]).toContain(
+      'phe Tình nhân độc lập',
+    );
+  });
+
+  it('makes Cupid and a Wolf an independent lover pair', () => {
+    const game = makeGame(
+      [makePlayer('cupid', Role.CUPID), makePlayer('wolf', Role.WOLF)],
+      GamePhase.NIGHT_CUPID,
+    );
+    const engine = new GameEngine();
+
+    engine.apply(game, 'cupid', {
+      type: GameActionType.PAIR_LOVERS,
+      targetIds: ['cupid', 'wolf'],
+    });
+
+    expect(game.players[0].faction).toBe(Faction.LOVERS);
+    expect(game.players[1].faction).toBe(Faction.LOVERS);
+    expect(game.players[0].state.notifications[0]).toContain(
+      'phe Tình nhân độc lập',
+    );
   });
 
   it('makes a Fool pair independent but awards a hanging Fool alone', () => {
@@ -257,7 +363,9 @@ describe('GameEngine', () => {
     expect(game.phase).toBe(GamePhase.FINISHED);
     expect(game.winners).toEqual([Faction.FOOL]);
     expect(game.winnerPlayerIds).toEqual(['fool']);
-    expect(game.players.find((player) => player.id === 'wolf')?.alive).toBe(false);
+    expect(game.players.find((player) => player.id === 'wolf')?.alive).toBe(
+      false,
+    );
   });
 
   it('changes a Cursed and Villager pair to independent lovers after conversion', () => {
@@ -281,7 +389,10 @@ describe('GameEngine', () => {
 
     game.phase = GamePhase.NIGHT_WITCH_POISON;
     game.nightState.wolfTargetId = 'cursed';
-    engine.apply(game, 'witch', { type: GameActionType.USE_POISON, use: false });
+    engine.apply(game, 'witch', {
+      type: GameActionType.USE_POISON,
+      use: false,
+    });
     expect(game.players[1].currentRole).toBe(Role.WOLF);
     expect(game.players[1].faction).toBe(Faction.LOVERS);
     expect(game.players[2].faction).toBe(Faction.LOVERS);
@@ -308,7 +419,10 @@ describe('GameEngine', () => {
 
     game.phase = GamePhase.NIGHT_WITCH_POISON;
     game.nightState.wolfTargetId = 'cursed';
-    engine.apply(game, 'witch', { type: GameActionType.USE_POISON, use: false });
+    engine.apply(game, 'witch', {
+      type: GameActionType.USE_POISON,
+      use: false,
+    });
     expect(game.players[1].currentRole).toBe(Role.WOLF);
     expect(game.players[1].faction).toBe(Faction.WOLF);
     expect(game.players[2].faction).toBe(Faction.WOLF);
