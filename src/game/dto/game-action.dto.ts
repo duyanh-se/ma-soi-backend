@@ -16,7 +16,11 @@ export class GameActionDto {
   @IsUUID()
   playerId!: string;
 
-  @ApiProperty({ enum: GameActionType })
+  @ApiProperty({
+    enum: GameActionType,
+    description:
+      'CAST_BLANK_NOMINATION và CAST_BLANK_EXECUTION gửi phiếu trắng, không cần targetId hoặc use.',
+  })
   @IsEnum(GameActionType)
   type!: GameActionType;
 

@@ -38,9 +38,10 @@ export enum GameActionType {
   USE_HEAL = 'USE_HEAL',
   USE_POISON = 'USE_POISON',
   NOMINATE = 'NOMINATE',
+  CAST_BLANK_NOMINATION = 'CAST_BLANK_NOMINATION',
   END_DEFENSE = 'END_DEFENSE',
   VOTE_EXECUTION = 'VOTE_EXECUTION',
-  ADVANCE_NIGHT = 'ADVANCE_NIGHT',
+  CAST_BLANK_EXECUTION = 'CAST_BLANK_EXECUTION',
 }
 
 export interface Inspection {
@@ -70,6 +71,9 @@ export interface GamePlayer {
   id: string;
   name: string;
   alive: boolean;
+  /** Public presence can lag behind actual death to avoid revealing a lover pair. */
+  publicAlive?: boolean;
+  pendingPublicDeath?: boolean;
   initialRole?: Role;
   currentRole?: Role;
   faction?: Faction;
@@ -86,10 +90,10 @@ export interface NightState {
 }
 
 export interface DayState {
-  nominationVotes: Record<string, string>;
+  nominationVotes: Record<string, string | null>;
   nominationRound: number;
   scaffoldedId?: string;
-  executionVotes: Record<string, boolean>;
+  executionVotes: Record<string, boolean | null>;
 }
 
 export interface GameState {
